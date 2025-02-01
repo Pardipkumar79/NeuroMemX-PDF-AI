@@ -1,0 +1,554 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import spacy
+from sklearn.metrics.pairwise import cosine_similarity
+import fitz  # PyMuPDF
+import pytesseract
+from PIL import Image
+import io
+import re
+import tkinter as tk
+from tkinter import filedialog, scrolledtext, messagebox, Menu  # 📊 Progress bar
+from sentence_transformers import SentenceTransformer
+import pickle
+import os
+import ollama
+import threading  # 🧵 Threads for background processes
+import time  # ⏳ Time measurement
+from tkinterweb import HtmlFrame  # 📜 HTML & LaTeX rendering
+
+# ========================== #
+#   🛠 CONFIGURATION 💡
+# ========================== #
+
+# 🔍 Similarity threshold for semantic search (0.8 = strict, 0.4 = lenient)
+SEMANTIC_THRESHOLD = 0.0
+
+# 🔎 Number of relevant sentences to find (more = better context for DeepSeek)
+TOP_K_RESULTS = 250
+
+# 📚 Number of sentences to pass as context to DeepSeek
+CONTEXT_SENTENCES = 250
+
+# 🏗 Query extension for more accurate semantic search
+QUERY_EXTENSION = "Explain {query} from a scientific perspective"
+
+# 🎭 Enable debugging? (True = shows all intermediate results in the console)
+DEBUG_MODE = True
+
+# ========================== #
+
+# Load the SpaCy model
+nlp = spacy.load("en_core_web_sm")
+
+# Load the SentenceTransformer model
+sbert_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+# Initialize chat history
+chat_history = []
+
+# General responses for common inputs
+general_responses = {
+    "hello": "Hello! How can I help? 😊",
+    "hi": "Hi! Nice to see you. Do you have a question?",
+    "how are you": "I'm good! And you?",
+    "what can you do": "I can process scientific documents and provide answers based on their content!",
+    "who are you": "I am NeuroMemX, a knowledge processing AI system. What would you like to know?"
+}
+
+# === DeepSeek as AI model for scientific answers ===
+class DeepSeekIntegration:
+    def __init__(self, model_name="deepseek-r1:14b"):
+        self.model_name = model_name
+
+    def generate_response(self, prompt, chat_window):
+        response_stream = ollama.generate(model=self.model_name, prompt=prompt, stream=True)
+        response_text = ""
+
+        for chunk in response_stream:
+            response_text += chunk['response']
+            chat_window.insert(tk.END, chunk['response'])  # ✅ Show response immediately
+            chat_window.yview(tk.END)
+            chat_window.update_idletasks()  # ✅ Prevent GUI from freezing
+
+        return response_text
+
+# === NeuroMemX: Adaptive Scientific Memory System ===
+class NeuroMemX:
+    def __init__(self, base_decay=0.05, resonance_factor=1.2, feedback_weight=0.7,
+                 consciousness_boost=1.1, multi_turn_weight=0.6):
+        """
+        NeuroMemX: A True AI Memory Extension
+        - Stores & links knowledge across multiple interactions.
+        - Retains scientific theories, formulas, and key concepts.
+        - Simulates long-term memory via weighted reinforcement.
+        """
+        self.base_decay = base_decay
+        self.resonance_factor = resonance_factor
+        self.feedback_weight = feedback_weight
+        self.consciousness_boost = consciousness_boost
+        self.multi_turn_weight = multi_turn_weight
+        self.semantic_threshold = SEMANTIC_THRESHOLD  # ✅ Automatically from configuration
+        self.memory_state = None
+        self.text_embeddings = None
+        self.sentences = None
+        self.formulas = []  # 🔥 Stores formulas independently from normal text!
+        self.formula_contexts = {}  # 🔥 Stores the context of formulas
+
+    def process_text(self, text_embeddings, user_feedback=None):
+        """
+        Processes user-provided text embeddings and updates memory storage.
+        :param text_embeddings: Array of sentence embeddings.
+        :param user_feedback: Dictionary {index: weight}, indicating key parts.
+        """
+        seq_len, embed_size = text_embeddings.shape
+        memory_state = np.zeros(seq_len)
+        semantic_similarities = cosine_similarity(text_embeddings)
+        decay_rates = self.base_decay * (1 + np.random.uniform(-0.02, 0.02, seq_len))
+        harmonic_weights = np.exp(-decay_rates * np.arange(seq_len))[:, None]
+
+        # User importance weighting
+        saturation_limits = np.full(seq_len, 5e3)  # Default memory limit
+        if user_feedback:
+            for index, weight in user_feedback.items():
+                if 0 <= index < seq_len:
+                    saturation_limits[index] *= 1 + (weight - 3) * 0.5
+
+        for i in range(1, seq_len):
+            # Memory reinforcement
+            memory_state[i] = (memory_state[i-1] + self.feedback_weight * np.tanh(text_embeddings[i-1].mean())
+                               + self.resonance_factor * np.cos(np.pi * i / 10))
+
+            # Boosting significant scientific concepts
+            if text_embeddings[i].mean() > 0.6:
+                memory_state[i] *= self.consciousness_boost
+
+            # Multi-turn memory connection
+            if i % 20 == 0:
+                memory_state[i] += self.multi_turn_weight * np.mean(memory_state[max(0, i-20):i])
+
+            # Semantic reinforcement
+            for j in range(max(0, i-20), i):
+                if semantic_similarities[i, j] > self.semantic_threshold:
+                    memory_state[i] += self.multi_turn_weight * memory_state[j]
+
+            # Memory saturation control
+            memory_state[i] = min(memory_state[i], saturation_limits[i])
+
+        self.memory_state = memory_state
+        self.text_embeddings = text_embeddings
+        return memory_state
+
+    def plot_memory(self):
+        """ Visualizes stored memory activation over time. """
+        if self.memory_state is None:
+            print("No memory data available. Run process_text() first.")
+            return
+        plt.figure(figsize=(12, 5))
+        plt.plot(range(len(self.memory_state)), self.memory_state, color="purple", linewidth=2)
+        plt.xlabel("Sentence Index")
+        plt.ylabel("Memory Activation")
+        plt.title("NeuroMemX: Long-Term Memory Activation Over Time")
+        plt.grid()
+        plt.show()
+
+    def semantic_search(self, query, top_k=TOP_K_RESULTS):  # ✅ Automatic number of hits
+        """
+        Performs a semantic search on the memory.
+        :param query: Query sentence.
+        :param top_k: Number of top results to return.
+        :return: List of top_k most similar sentences.
+        """
+        if self.text_embeddings is None:
+            print("No memory data available. Run process_text() first.")
+            return []
+
+        # Generate embedding for the query
+        query_embedding = generate_embeddings([query])[0]
+
+        # Debugging: Print the query embedding
+        if DEBUG_MODE:
+            print(f"Query Embedding: {query_embedding}")
+
+        # Calculate similarities
+        similarities = cosine_similarity([query_embedding], self.text_embeddings)[0]
+
+        # Debugging: Print the similarities
+        if DEBUG_MODE:
+            print(f"Similarities: {similarities}")
+
+        # Get top_k most similar sentences
+        top_indices = similarities.argsort()[-top_k:][::-1]
+        top_sentences = [self.sentences[i] for i in top_indices]
+
+        return top_sentences
+
+    def save_memory(self, file_path="memory_state.pkl"):
+        """
+        Saves the memory state to a file.
+        :param file_path: Path to the file.
+        """
+        with open(file_path, 'wb') as f:
+            pickle.dump({'memory_state': self.memory_state, 'text_embeddings': self.text_embeddings, 'sentences': self.sentences, 'formulas': self.formulas, 'formula_contexts': self.formula_contexts}, f)
+
+    def load_memory(self, file_path="memory_state.pkl"):
+        """
+        Loads the memory state from a file, if available.
+        :param file_path: Path to the file.
+        """
+        if not os.path.exists(file_path):
+            print("⚠ No saved memory found. Please upload a file first.")
+            return "⚠ No saved memory found."
+
+        with open(file_path, 'rb') as f:
+            data = pickle.load(f)
+            self.memory_state = data.get('memory_state', None)
+            self.text_embeddings = data.get('text_embeddings', None)
+            self.sentences = data.get('sentences', None)
+            self.formulas = data.get('formulas', [])
+            self.formula_contexts = data.get('formula_contexts', {})
+
+        return "📂 Memory successfully loaded!"
+
+# === Integration in NeuroMemX Chat System ===
+class NeuroMemXWithDeepSeek(NeuroMemX):
+    def __init__(self, base_decay=0.05, resonance_factor=1.2, feedback_weight=0.7,
+                 consciousness_boost=1.1, multi_turn_weight=0.6,
+                 deepseek_model="deepseek-r1:14b"):
+        """
+        Enhanced version of NeuroMemX with DeepSeek as the generative language model.
+        """
+        super().__init__(base_decay, resonance_factor, feedback_weight, consciousness_boost,
+                         multi_turn_weight)
+        self.deepseek = DeepSeekIntegration(deepseek_model)
+
+    def generate_smart_response(self, query, context="", chat_window=None):
+        """
+        Generates an AI-assisted response based on stored concepts and DeepSeek.
+        """
+        # Integrate formulas and their context into the query context
+        formula_context = ""
+        for formula, context_snippet in self.formula_contexts.items():
+            formula_context += f"Formula: {formula}\nContext: {context_snippet}\n"
+
+        combined_context = f"{context}\n{formula_context}"
+
+        prompt = f"Context: {combined_context}\nQuestion: {query}\nScientific Response:"
+
+        if DEBUG_MODE:
+            print(f"FINAL PROMPT:\n{prompt}\n")
+
+        return self.deepseek.generate_response(prompt, chat_window)
+
+def extract_text_and_formulas(pdf_path):
+    """Extracts text & recognizes mathematical formulas in a PDF."""
+    doc = fitz.open(pdf_path)
+    sentences = []
+    formulas = []  # Stores formulas separately
+    formula_contexts = {}  # Stores the context of formulas
+
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        text = page.get_text("text")
+        sentences.extend(text.split("\n"))  # Splits the text into sentences
+
+        # 🔍 Search for LaTeX-like formulas in the text
+        latex_matches = re.findall(r"\\[a-zA-Z]+[{].+?[}]", text)
+        for match in latex_matches:
+            formulas.append(match)
+            # Extract the context of the formula
+            context_start = max(0, text.find(match) - 100)
+            context_end = min(len(text), text.find(match) + len(match) + 100)
+            formula_contexts[match] = text[context_start:context_end]
+
+        # 🖼 Check for embedded formula images
+        for img_index, img in enumerate(page.get_images(full=True)):
+            xref = img[0]
+            base_image = doc.extract_image(xref)
+            img_bytes = base_image["image"]
+            img = Image.open(io.BytesIO(img_bytes))
+
+            # Apply OCR to the formula image
+            formula_text = pytesseract.image_to_string(img, config="--psm 6")
+            if formula_text.strip():
+                formulas.append(formula_text)
+                # Extract the context of the formula
+                context_start = max(0, text.find(formula_text) - 100)
+                context_end = min(len(text), text.find(formula_text) + len(formula_text) + 100)
+                formula_contexts[formula_text] = text[context_start:context_end]
+
+    return sentences, formulas, formula_contexts
+
+def generate_embeddings(sentences):
+    """
+    Generates embeddings for a list of sentences using SentenceTransformer.
+    :param sentences: List of sentences.
+    :return: Array of sentence embeddings.
+    """
+    return sbert_model.encode(sentences, convert_to_numpy=True)
+
+# Initialize the NeuroMemX object globally
+nm = NeuroMemXWithDeepSeek()
+
+def show_latex_window(formulas, formula_contexts):
+    """Displays recognized LaTeX formulas and their context in a separate preview window."""
+    if not formulas:
+        return  # If no formulas are found, abort
+
+    latex_window = tk.Toplevel()
+    latex_window.title("LaTeX Preview")
+    latex_window.geometry("800x600")
+
+    # 🔹 MathJax for LaTeX rendering
+    latex_html = """
+    <html>
+    <head>
+        <script type="text/javascript"
+            src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.7/MathJax.js?config=TeX-MML-AM_CHTML">
+        </script>
+    </head>
+    <body>
+    """
+    for formula, context in formula_contexts.items():
+        latex_html += f"<p>Formula: $$ {formula} $$</p>\n"
+        latex_html += f"<p>Context: {context}</p>\n"
+
+    latex_html += "</body></html>"
+
+    frame = HtmlFrame(latex_window)
+    frame.pack(fill="both", expand=True)
+    frame.load_html(latex_html)
+
+def configure_settings():
+    config_window = tk.Toplevel()
+    config_window.title("Settings")
+    config_window.geometry("400x300")
+
+    tk.Label(config_window, text="Semantic Threshold:").pack(pady=5)
+    semantic_threshold_entry = tk.Entry(config_window)
+    semantic_threshold_entry.insert(0, str(SEMANTIC_THRESHOLD))
+    semantic_threshold_entry.pack(pady=5)
+
+    tk.Label(config_window, text="Number of Relevant Sentences:").pack(pady=5)
+    top_k_results_entry = tk.Entry(config_window)
+    top_k_results_entry.insert(0, str(TOP_K_RESULTS))
+    top_k_results_entry.pack(pady=5)
+
+    tk.Label(config_window, text="Number of Context Sentences:").pack(pady=5)
+    context_sentences_entry = tk.Entry(config_window)
+    context_sentences_entry.insert(0, str(CONTEXT_SENTENCES))
+    context_sentences_entry.pack(pady=5)
+
+    def save_settings():
+        global SEMANTIC_THRESHOLD, TOP_K_RESULTS, CONTEXT_SENTENCES
+        SEMANTIC_THRESHOLD = float(semantic_threshold_entry.get())
+        TOP_K_RESULTS = int(top_k_results_entry.get())
+        CONTEXT_SENTENCES = int(context_sentences_entry.get())
+        config_window.destroy()
+
+    save_button = tk.Button(config_window, text="Save", command=save_settings)
+    save_button.pack(pady=20)
+
+def save_chat():
+    file_path = filedialog.asksaveasfilename(defaultextension=".pkl", filetypes=[("Pickle files", "*.pkl")])
+    if file_path:
+        with open(file_path, 'wb') as f:
+            pickle.dump(chat_history, f)
+        messagebox.showinfo("Info", "Chat history successfully saved!")
+
+def load_chat():
+    file_path = filedialog.askopenfilename(filetypes=[("Pickle files", "*.pkl")])
+    if file_path:
+        with open(file_path, 'rb') as f:
+            global chat_history
+            chat_history = pickle.load(f)
+        messagebox.showinfo("Info", "Chat history successfully loaded!")
+        update_chat_window()
+
+def update_chat_window():
+    chat_window.delete(1.0, tk.END)
+    for entry in chat_history:
+        chat_window.insert(tk.END, entry + "\n")
+    chat_window.yview(tk.END)
+
+def main():
+    global nm, chat_history  # Reference to the global objects
+
+    # Create the main window
+    root = tk.Tk()
+    root.title("NeuroMemX GUI")
+    root.geometry("1200x1000")
+    root.configure(bg="#f4f4f4")  # Set background color
+
+    # Create a menu bar
+    menubar = Menu(root)
+    root.config(menu=menubar)
+
+    # Create a settings menu
+    settings_menu = Menu(menubar, tearoff=0)
+    menubar.add_cascade(label="Settings", menu=settings_menu)
+    settings_menu.add_command(label="Configuration", command=configure_settings)
+
+    # Create a chat menu
+    chat_menu = Menu(menubar, tearoff=0)
+    menubar.add_cascade(label="Chat", menu=chat_menu)
+    chat_menu.add_command(label="Save Chat", command=save_chat)
+    chat_menu.add_command(label="Load Chat", command=load_chat)
+
+    # Create a frame for the chat window
+    chat_frame = tk.Frame(root)
+    chat_frame.pack(pady=10)
+
+    # Create a scrolled text widget for the chat window
+    global chat_window
+    chat_window = scrolledtext.ScrolledText(chat_frame, width=80, height=20)
+    chat_window.pack()
+    chat_window.configure(bg="#ffffff", fg="#000000")  # Adjust background & text color
+
+    # Create a scrolled text widget for detailed results
+    results_window = scrolledtext.ScrolledText(chat_frame, width=80, height=10)
+    results_window.pack()
+    results_window.configure(bg="#eeeeee", fg="#222222")
+
+    # Create a frame for the input field and buttons
+    input_frame = tk.Frame(root)
+    input_frame.pack(pady=10)
+
+    # Create an entry widget for the user input
+    input_field = tk.Entry(input_frame, width=60)
+    input_field.pack(side=tk.LEFT, padx=10)
+
+    # Create a button to upload a PDF file
+    def upload_pdf():
+        global nm  # Reference to the global object
+        pdf_path = filedialog.askopenfilename(title="Select a PDF file", filetypes=[("PDF files", "*.pdf")])
+        if not pdf_path:
+            messagebox.showinfo("Info", "No file selected.")
+            return
+
+        show_loading("📂 Processing PDF...")
+        threading.Thread(target=process_pdf, args=(pdf_path,)).start()
+
+    def process_pdf(pdf_path):
+        global nm
+        pdf_sentences, pdf_formulas, pdf_formula_contexts = extract_text_and_formulas(pdf_path)
+        if not pdf_sentences and not pdf_formulas:
+            chat_window.insert(tk.END, "⚠ WARNING: Little or no text extracted! Is the PDF scanned?\n")
+            remove_loading()
+            return
+
+        chat_window.insert(tk.END, f"📄 {len(pdf_sentences)} sentences and {len(pdf_formulas)} formulas extracted.\n")
+
+        nm.sentences = pdf_sentences
+        nm.formulas = pdf_formulas  # 🔥 Stores formulas independently from normal text!
+        nm.formula_contexts = pdf_formula_contexts  # 🔥 Stores the context of formulas
+        nm.process_text(generate_embeddings(pdf_sentences))
+        nm.save_memory('memory_state.pkl')
+
+        chat_window.insert(tk.END, "✅ PDF successfully processed and saved.\n")
+        remove_loading()
+
+    upload_button = tk.Button(input_frame, text="Upload PDF", command=upload_pdf)
+    upload_button.pack(side=tk.LEFT, padx=10)
+
+    # Create a button to perform semantic search
+    def perform_search():
+        global nm, chat_history
+        query = input_field.get().strip()
+        if not query:
+            messagebox.showinfo("Info", "Please enter a search query.")
+            return
+
+        # 🟢 1. Update GUI: Set loading indicator
+        show_loading("🔍 Searching...")
+
+        # 🧵 2. Start the search in a separate thread (to avoid blocking the GUI)
+        search_thread = threading.Thread(target=run_deepseek_search, args=(query,))
+        search_thread.start()
+
+    def run_deepseek_search(query):
+        """This function performs the DeepSeek search in a separate thread and updates the GUI."""
+        global chat_history, loading_label
+
+        start_time = time.time()  # ⏳ Measure start time
+
+        # If no stored sentences are available
+        if not nm.sentences:
+            chat_window.insert(tk.END, "⚠ No stored sentences in NeuroMemX!\n")
+            remove_loading()  # Remove the loading label
+            return
+
+        query_extended = f"If {query} has a formula or equation, provide it fully and explain its components."
+
+        # 🔎 3. Semantic search for relevant sentences
+        results = nm.semantic_search(query_extended, top_k=TOP_K_RESULTS)
+
+        if not results:
+            chat_window.insert(tk.END, f"⚠ No relevant results found for '{query}'!\n")
+            remove_loading()  # Remove the loading label
+            return
+
+        # 📄 4. Show found sentences directly in the GUI
+        results_window.delete(1.0, tk.END)  # Clear previous results
+        results_window.insert(tk.END, "📄 Found relevant sentences:\n")
+        for i, res in enumerate(results[:TOP_K_RESULTS]):  # Show all configured sentences
+            results_window.insert(tk.END, f"{i+1}. {res}\n\n")
+
+        results_window.yview(tk.END)
+
+        # 📐 5. Prioritize mathematical equations and scientific terms
+        math_symbols = ["=", "+", "-", "*", "/", "^", "∑", "∫", "≈", "Δ", "∂", "π", "∞", "→", "√", "log", "sin", "cos", "tan"]
+        science_terms = ["Theorem", "Equation", "Model", "Formula", "Matrix", "Tensor", "Wavefunction", "Quantum", "Dynamics"]
+        math_sentences = [s for s in results if any(sym in s for sym in math_symbols)]
+        science_sentences = [s for s in results if any(term in s for term in science_terms)]
+
+        # 🛠 **FIX**: Combine mathematical, scientific, and other relevant sentences
+        knowledge_context = " ".join(math_sentences + science_sentences + results[:CONTEXT_SENTENCES])
+
+        # 🧠 6. Generate AI response with DeepSeek
+        try:
+            response = nm.generate_smart_response(query, context=knowledge_context, chat_window=chat_window)
+        except Exception as e:
+            chat_window.insert(tk.END, f"⚠ Error with DeepSeek: {str(e)}\n")
+            response = "⚠ DeepSeek could not generate a response."
+
+        end_time = time.time()  # ⏳ Measure end time
+
+        # ⏱ 7. Show the duration of processing
+        duration = round(end_time - start_time, 2)
+        chat_window.insert(tk.END, f"✅ Response generated in {duration} seconds.\n")
+
+        # 📝 8. Save the chat history
+        chat_history.append(f"User: {query}")
+        chat_history.append(f"NeuroMemX: {response}")
+
+        chat_window.insert(tk.END, f"👤 You: {query}\n")
+        chat_window.insert(tk.END, f"🤖 NeuroMemX: {response}\n\n")
+        chat_window.yview(tk.END)
+
+        remove_loading()  # Remove the loading label
+
+    def show_loading(text="⏳ AI thinking..."):
+        global loading_label
+        loading_label = tk.Label(chat_window, text=text, font=("Arial", 12, "italic"))
+        chat_window.window_create(tk.END, window=loading_label)
+        chat_window.yview(tk.END)
+        chat_window.update_idletasks()
+
+    def remove_loading():
+        global loading_label
+        if loading_label:
+            loading_label.destroy()
+
+    search_button = tk.Button(input_frame, text="Search", command=perform_search)
+    search_button.pack(side=tk.LEFT, padx=10)
+
+    # Create a button to show LaTeX in a separate window
+    latex_button = tk.Button(input_frame, text="Show LaTeX", command=lambda: show_latex_window(nm.formulas, nm.formula_contexts))
+    latex_button.pack(side=tk.LEFT, padx=10)
+
+    # Start the main loop
+    root.mainloop()
+
+if __name__ == "__main__":
+    main()
